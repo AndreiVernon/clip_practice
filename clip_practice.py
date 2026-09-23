@@ -8,13 +8,16 @@ import open_clip
 from PIL import Image
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 IMAGE_DIR = "images"
+HEATMAP_DIR = "heatmaps"
 
 # (model name, pretrained tag, display label)
 MODELS_TO_TEST = [
     ("ViT-B-32", "openai", "B-32 OpenAI"),
-    ("ViT-L-14", "openai", "L-32 OpenAI"),
+    ("ViT-L-14", "openai", "L-14 OpenAI"),
     ("ViT-B-32", "laion2b_s34b_b79k", "B-32 LAION2B"),
 ]
 
@@ -99,7 +102,46 @@ def evaluate_model(embeddings, filenames):
     }
 
 
+def build_similarity_matrix(embeddings, filenames):
+    # cosine similarity matrix across every image
+    n = len(filenames)
+    matrix = np.zeros((n, n))
+    for i, n1 in enumerate(filenames):
+        for j, n2 in enumerate(filenames):
+            matrix[i][j] = cosine_similarity(
+                embeddings[n1].reshape(1, -1), embeddings[n2].reshape(1, -1)
+            )[0][0]
+    return matrix
+
+
+def plot_heatmap(matrix, filenames, title, save_path):
+    order = sorted(range(len(filenames)), key=lambda i: get_item_id(filenames[i]))
+    sorted_names = [filenames[i] for i in order]
+    sorted_matrix = matrix[np.ix_(order, order)]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(
+        sorted_matrix,
+        xticklabels=sorted_names,
+        yticklabels=sorted_names,
+        cmap="viridis",
+        vmin=0, vmax=1,
+        square=True,
+        cbar_kws={"label": "cosine similarity"},
+        ax=ax,
+    )
+    ax.set_title(title)
+    plt.xticks(rotation=90, fontsize=7)
+    plt.yticks(rotation=0, fontsize=7)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"saved heatmap to {save_path}")
+
+
 if __name__ == "__main__":
+    os.makedirs(HEATMAP_DIR, exist_ok=True)
+
     filenames = load_image_list(IMAGE_DIR)
     print(f"found {len(filenames)} images in '{IMAGE_DIR}'")
 
@@ -124,13 +166,21 @@ if __name__ == "__main__":
 
         scores = evaluate_model(embeddings, filenames)
         print(f"top-1 accuracy: {scores['top1_accuracy']:.2%}")
-        print(f"top-3 accuracy: {scores['top3_accuracy']:.2%}\n")
+        print(f"top-3 accuracy: {scores['top3_accuracy']:.2%}")
+
+        # make heatmap
+        matrix = build_similarity_matrix(embeddings, filenames)
+        safe_label = re.sub(r"[^a-zA-Z0-9]+", "_", label).strip("_")
+        heatmap_path = os.path.join(HEATMAP_DIR, f"{safe_label}.png")
+        plot_heatmap(matrix, filenames, f"{label} — pairwise cosine similarity", heatmap_path)
+        print()
 
         model_results.append({
             "label": label,
             "model_name": model_name,
             "pretrained": pretrained,
             "load_time": load_time,
+            "matrix": matrix,
             **timing,
             **scores,
         })
@@ -162,3 +212,30 @@ if __name__ == "__main__":
     for rank, r in enumerate(efficiency_ranked, start=1):
         efficiency = r["top1_accuracy"] / (r["avg_time_per_image"] * 1000)
         print(f"{rank}. {r['label']}  ({efficiency:.4f} accuracy/ms)")
+
+    # heatmap comparison image with all the models we usedd
+    fig, axes = plt.subplots(1, len(model_results), figsize=(7 * len(model_results), 6))
+    if len(model_results) == 1:
+        axes = [axes]
+    order = sorted(range(len(filenames)), key=lambda i: get_item_id(filenames[i]))
+    sorted_names = [filenames[i] for i in order]
+    for ax, r in zip(axes, model_results):
+        sorted_matrix = r["matrix"][np.ix_(order, order)]
+        sns.heatmap(sorted_matrix, xticklabels=sorted_names, yticklabels=sorted_names,
+                    cmap="viridis", vmin=0, vmax=1, square=True, cbar=False, ax=ax)
+        ax.set_title(f"{r['label']}\ntop-1: {r['top1_accuracy']:.0%}", fontsize=10)
+        ax.tick_params(labelsize=6)
+        plt.setp(ax.get_xticklabels(), rotation=90)
+        plt.setp(ax.get_yticklabels(), rotation=0)
+
+        #debug: get raw values
+        # print(f"\npairwise similarity matrix ({r['label']}):")
+        # print("        " + "  ".join(f"{n[:8]:>8}" for n in sorted_names))
+        # for i, n in enumerate(sorted_names):
+        #     print(f"{n[:10]:>10}" + "  ".join(f"{sorted_matrix[i][j]:.3f}" for j in range(len(sorted_names))))
+
+    plt.tight_layout()
+    combined_path = os.path.join(HEATMAP_DIR, "all_models_comparison.png")
+    plt.savefig(combined_path, dpi=150)
+    plt.close(fig)
+    print(f"\nsaved side-by-side comparison to {combined_path}")
